@@ -1,11 +1,13 @@
 // package ...;
 // TODO: Remanme the package as “util”, “misc” or “miscutils”
 import java.io.IOException;
+import java.io.PrintStream;
 import java.net.URISyntaxException;
-import java.security.NoSuchAlgorithmException;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.function.Function;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 // import static *.*.[*.[*. ...]]{method|"*"};
 // import static java.lang.Math.*;
@@ -22,6 +24,64 @@ public class fn {
 //			throw new IllegalStateException("The class "+fn.class.getName()+" has already been defined in a parent classloader");
 //		}
 //	}
+	
+	
+	// ------------------------------------------------- Natives ------------------------------------------------
+	private static boolean nativeLoaded = false;
+	private static boolean nativeLoadTried = false;
+	
+	public static boolean nativeLoaded() {return nativeLoaded;}
+	public static boolean nativeLoadTried() {return nativeLoadTried;}
+	
+	static {
+		// Do it on-demand instead
+//		loadNatives();
+	}
+	
+	/** Attempts to load the necessary native libraries to the loader classloader, for the native methods to be
+	 *  linked with. Returns the success state.
+	 *
+	 *  Note: 2 classloader cannot have the same (at the same location) native libraries loaded to themselves.
+	 *  A parent classloader should load such a library for them and let the sub classloader use its class'
+	 *  native methods.
+	 **/
+	public static boolean loadNatives() {
+		if (nativeLoadTried) return nativeLoaded; // Already done
+		boolean loaded = true;
+		loaded = loaded & fn.loadLibrary("ProcessCMDLine");
+		nativeLoaded = loaded;
+		nativeLoadTried = true;
+		return nativeLoaded;
+	}
+	
+	
+	public static native String getCommandLineW();
+	public static native String getCommandArgsW();
+	// ----------------------------------------------------------------------------------------------------------
+	
+	
+	
+	// -------------------------------------------- Process commandline --------------------------------------------
+	// Specific for Windows because the Java Runtime Environment doesn't get the arguments from Windows consoles
+	// properly and all the non-latin characters get broken.
+	public static String getCmdLine() {
+		if (!nativeLoadTried) loadNatives();
+		if (nativeLoaded) return getCmdLine0();
+		else return null;
+	}
+	private static String[] getCmdArgs() {
+		if (!nativeLoadTried) loadNatives();
+		if (nativeLoaded) return getCmdArgs0();
+		else return null;
+	}
+	
+	private static native String getCmdLine0();
+	private static native String[] getCmdArgs0();
+	
+	// -------------------------------------------------------------------------------------------------------------
+	
+	
+	
 	
 	
 	static {
@@ -54,10 +114,128 @@ public class fn {
 	
 	
 	/* ------------------------------------------------ Basic IO operations ------------------------------------------------ */
-//	private static class inputGetterHolder { // In order not to call until it is needed.
-//	//	public static final java.io.BufferedReader getter = new java.io.BufferedReader(new java.io.InputStreamReader(System.in));
-//	}
-//	private static java.lang.ref.Reference<java.io.BufferedReader> inputGetter = null;
+	public static class ProcessConsoleIO {
+		private ProcessConsoleIO() {}
+		
+		/* Considering 3 different consoles: the Unix shell, the Windows console and console of the Eclipse on Windows;
+		 *   -> Unix shell does not misbehave in printing Unicode text in Java, but the others require using the C-way (through a native JNI lib)
+		 *   -> All of them suffer in doing the same in C, but we need the C-way only for Windows and Eclipse Windows consoles.
+		 *   -> Unix shell and the Windows Eclipse console needs setlocale(LC_CTYPE, "")...
+		 *   -> ...however, Windows console needs the not-so-nice-looking _setmode(_fileno(stdout), _O_U16TEXT), which ruins the others!
+		 *   -> If the code prints a unicode text on Windows console without problem, it can't do that in the same way onto Windows CMD.
+		 *
+		 * 04-08-2024: Consoles have a codepage and processes like Java can access to them and encode their strings
+		 * to print accordingly. If it is 65001 then it means the console will be using UTF-8, and therefore processes
+		 * (at least Java) see that and their print functions accordingly encode the variables.
+		 */
+		
+		
+		private static boolean console65001Done = false;
+		private static boolean console65001Tried = false;
+		
+		
+		/** Writes the UTF-8 encoding result of the text without any extra newline. */
+		public static void print(java.io.PrintStream into, String text) {
+			if (!console65001Tried) {
+				// FIXME: --- how to determine the OS???
+				changeCHCPTo65001(false, true);
+			}
+			if (console65001Done) {
+				// We're changing the CHCP after the Java process started; PrintStream.write will still use the
+				// initial one --- so we can't use that and have to directly write it as bytes instead.
+				try {into.write(str.utf8(text));}
+				catch (IOException e) {throw new InternalError(e);}
+			} else {
+				into.print(text);
+			}
+		}
+		
+		
+		/** Writes the UTF-8 encoding result of a newline, regarding the OS' line separator. */
+		public static void println(java.io.PrintStream into) {
+			print(into, str.platformLineSeparator());
+		}
+		
+		
+		
+		public static void changeCHCPTo65001(boolean forUnix, boolean forWin) {
+			console65001Tried = true;
+			try {
+				if (forWin) WindowsChangeCHCPTo65001();
+				console65001Done = true;
+			} catch (Error e) {
+				System.err.println("Warning: Couldn't set the console codepage: "+e.getMessage());
+				System.err.println(str.getStackTraceText(e));
+			}
+		}
+		
+		public static void WindowsChangeCHCPTo65001() {
+			windowsSetCHCP(65001);
+		}
+		
+		public static int windowsGetCHCP() {
+			var outs = execReturnRedirectInput(new String[] {"cmd.exe", "/c", "chcp"});
+			return getValueFromWindowsCHCPCommand(outs);
+		}
+		
+		/** Changes the codepage/encoding of the console host process that provides this process' CLI on Windows
+		 * systems. Works by spawning a new CMD process that runs chcp something, but has its input redirected to
+		 * the parent process therefore its codepage changes too.
+		 * <p>Warning: On IDEs (such as IntelliJ IDEA), does not seem to change the codepage; but they are already
+		 * intelligent enough to properly use UTF-8 anyway.
+		 * <p>Returns normally if the CHCP command succeeds. */
+		public static void windowsSetCHCP(int to) throws RuntimeException {
+			var outs = execReturnRedirectInput(new String[] {"cmd.exe", "/c", "chcp", ""+to});
+			int value = getValueFromWindowsCHCPCommand(outs);
+			if (value != to) throw new RuntimeException("CHCP didn'tf set the codepage to the specified value");
+		}
+		
+		private static fn.Tuple3<Integer, String, String> execReturnRedirectInput(String[] args) {
+			ProcessBuilder pb = new ProcessBuilder(args);
+			pb.redirectInput(ProcessBuilder.Redirect.INHERIT);
+			final Process p;
+			final int retVal;
+			try {
+				p = pb.start();
+				retVal = p.waitFor();
+			} catch (InterruptedException | IOException e) {
+				throw new RuntimeException(e);
+			}
+			
+			final byte[] output, error;
+			try {
+				output = p.getInputStream().readAllBytes();
+				error = p.getErrorStream().readAllBytes();
+			} catch (IOException e) {
+				throw new RuntimeException(e);
+			}
+			return fn.tuple(retVal, str.utf8(output), str.utf8(error));
+		}
+		
+		
+		private static int getValueFromWindowsCHCPCommand(fn.Tuple3<Integer, String, String> outputs) {
+			String outputText = outputs.val2;
+			String errorText = outputs.val3;
+			
+			Pattern pat = Pattern.compile("(?:\\r?\\n)*Active code page: ([0-9]+)(?:\\r?\\n)*");
+			Matcher m = pat.matcher(outputText);
+			int val;
+			A:	{
+				if (outputs.val1 != 0) {
+					throw new RuntimeException("CHCP didn\'t exit with 0 and returned: "+outputText+errorText);
+				}
+				if (m.matches()) {
+					try {
+						val = str.decimalToInt(m.group(1));
+						break A;
+					} catch (NumberFormatException e) {}
+				}
+				throw new RuntimeException("CHCP returned an unexpected value: "+outputText);
+			}
+			return val;
+		}
+	}
+	
 	@SuppressWarnings("resource") // Because I of course won't close the InputStream System.in (by closing any buffered wrapper of it).
 	public static String getLine() {
 		if (inputGetter == null) inputGetter = cachedReference(
@@ -66,7 +244,9 @@ public class fn {
 		try {return inputGetter.get().readLine();}
 	//	catch (java.io.IOException e) {e.printStackTrace(); return null;}
 		catch (java.io.IOException e) {throw new RuntimeException(e);}
-	} private static Supplier<java.io.BufferedReader> inputGetter = null;
+	}
+	
+	private static Supplier<java.io.BufferedReader> inputGetter = null;
 	
 	public static java.io.PrintStream outStream() {return outputStream.get();}
 	public static void outStream(Supplier<java.io.PrintStream> set) {outputStream = set;}
@@ -80,33 +260,48 @@ public class fn {
 			if (newline) text.printlnTo(outStream());
 			else text.printTo(outStream());
 		}
-		else print(str.toString(obj), newline);
+		else print(outStream(), str.toString(obj), newline);
 	}
 	
 	private static boolean warnedCROnce = false;
-	@SuppressWarnings("resource")
-	private static void print(String strn, boolean newline) {
+	
+	private static void print(PrintStream into, String strn, boolean newline) {
 		if (fn.isAssertOn()) {
 			if (!warnedCROnce) {
 				java.util.regex.Pattern p = java.util.regex.Pattern.compile("\\r(?!\\n)");
 				java.util.regex.Matcher m = p.matcher(strn);
 				if (m.find())
 					fn.log("[Warning] A string passed to fn.print contains a CR character. "
-					     + "Could you have splitted sth. with \u201c\\\\n\u201d instead"
+					     + "Could you have splitted sth. with \u201c\\\\n\u201d instead "
 					     + "of \u201c(\\\\r)?\\n\u201d?"
 					);
 			}
 		}
-		str.StrNative.print(strn);
-		if (newline) outStream().println("");
-		outStream().flush();
+		if (newline)
+			ProcessConsoleIO.print(into, strn + str.platformLineSeparator());
+		else
+			ProcessConsoleIO.print(into, strn);
+		into.flush();
 	}
-	public static void printe(Object obj) {System.err.println(str.toString(obj)); System.err.flush();}
-	public static void printe(Object obj, String end) {System.err.print(str.toString(obj) + end); System.err.flush();}
+	
+	public static void printe(Object obj) {
+		print(System.err, str.toString(obj), true);
+	}
+	public static void printe(Object obj, String end) {
+		print(System.err, str.toString(obj) + end, false);
+	}
 	public static void print(Object obj, String end) {print(str.toString(obj) + end, false);}
 	public static void print() {print("");}
-	public static void print(Object obj, int itr) {if (itr>=0) for (@SuppressWarnings("unused") int i: range(itr)) print(obj);}
-	public static void print(Object obj, int itr, String delimiter) {for (@SuppressWarnings("unused") int i: range(itr-1)) {print(obj, false); print(delimiter, false);} print(obj, true);}
+	public static void print(Object obj, int itr) {
+		if (itr >= 0) for (@SuppressWarnings("unused") int i: range(itr)) print(obj);
+	}
+	public static void print(Object obj, int itr, String delimiter) {
+		for (@SuppressWarnings("unused") int i: range(itr - 1)) {
+			print(obj, false);
+			print(delimiter, false);
+		}
+		print(obj, true);
+	}
 	/* ------------------------------------------------ ------------------- ------------------------------------------------ */
 	
 	
@@ -167,6 +362,10 @@ public class fn {
 	
 	
 	
+	
+	
+	
+	// TODO: Create a class named “Math” for those!
 	/* ------------------------------------------------ Math operations ------------------------------------------------ */
 	public static int remainder(int num, int by) {return num % by;}
 	/** Euclidian modulo. Not remainder. */
@@ -203,6 +402,48 @@ public class fn {
 		return m;
 	}
 	
+	/** Rounds a fp down (not towards 0 but absolutely downwards regardless of its sign and regardless of the
+	 *  behavior of typecasting a negative fp into an int (in terms of rounding absolutely down or closer to 0).
+	 *  <p> • 3.001 –> 3
+	 *  <p> • 3.000 –> 3
+	 *  <p> • 2.999 –> 2
+	 *  <p> • -2.999 –> -3
+	 *  <p> • -3.000 –> -3
+	 *  <p> • -3.001 –> -4
+	 *  */
+	public static int floor(double n) {
+		final boolean simpleOneLiner = false;
+		
+		final int result;
+		if (n >= 0) {
+			result = (int) n;
+		} else {
+			if (simpleOneLiner) {
+				return ((int) (n + (1 + ((int) (-n))))) - (1 + ((int) (-n)));
+			} else {
+				// Shift the negative number to make it positive, apply int downcast and then
+				// shift it back by the same amount.
+				
+				// Don't rely on negative numbers' integer downcast behavior (use positive instead)
+				final int nDistance0ABitSmallerEq = (int) (-n); // TODO: Or call roundDown again
+				fn.assertAnyway(nDistance0ABitSmallerEq <= Math.abs(n));
+				final int arbitraryAtLeastOne = 100;
+				fn.assertAnyway(arbitraryAtLeastOne >= 1);
+				final int nDistance0Larger = nDistance0ABitSmallerEq + arbitraryAtLeastOne;
+				fn.assertAnyway(nDistance0Larger > Math.abs(n));
+				fn.assertAnyway(Math.abs(n) >= nDistance0ABitSmallerEq);
+				final double shifted = n + nDistance0Larger;
+				fn.assertAnyway(shifted >= 0);
+				final int roundedDown = (int) shifted; // TODO: Or call roundDown again
+				final int roundedDownShiftedBack = roundedDown - nDistance0Larger;
+				result = roundedDownShiftedBack;
+			}
+		}
+		fn.assertAnyway(result <= n);
+		return result;
+	}
+	
+	
 	private static boolean isGreaterThan(int a, int than, boolean atLeast) {
 		if (atLeast) return a >= than;
 		else return a > than;
@@ -212,13 +453,6 @@ public class fn {
 		if (over <= 0) throw new IllegalArgumentException();
 		if (over % 2 == 0) return isGreaterThan(num, (over/2), atLeast);
 		else return isGreaterThan(num, (over/2), false);
-	}
-	public static int divide(int whole, int by, boolean halfUp) {
-		if (whole < 0) throw new IllegalArgumentException();
-		if (by <= 0) throw new IllegalArgumentException();
-		int frag = whole / by;
-		if (isMoreThanHalf(whole % by, by, halfUp)) frag++;
-		return frag;
 	}
 	
 	public static long gcd(long a, long b) {
@@ -238,8 +472,8 @@ public class fn {
 	
 	public static class Primes {
 		
-		// From https://stackoverflow.com/a/62150343
-		// (except the Dynamic Programming Cache part)
+		/** From <a href="https://stackoverflow.com/a/62150343">this</a> page
+		 * (except the Dynamic Programming Cache part) */
 		public static boolean isPrime(PrimeCache cache, long n) {
 			final long veryLarge = pow(10, 10);
 			final boolean isPrime;
@@ -294,7 +528,9 @@ public class fn {
 	}
 	
 	// TODO: Tested only a little!
-	// From https://www.geeksforgeeks.org/modular-exponentiation-power-in-modular-arithmetic
+	/** Returns (base^exponent) % modulus in much shorter way than actually multiplying and returning them
+	 *  <p>From <a href="https://www.geeksforgeeks.org/modular-exponentiation-power-in-modular-arithmetic">this</a> page.
+	 */
 	public static long powMod(long base, long exponent, long modulus) {
 		if (base < 0) throw new IllegalArgumentException();
 		if (modulus < 0) throw new IllegalArgumentException();
@@ -316,7 +552,201 @@ public class fn {
 		}
 		return res;
 	}
+	
+	
+	
+	
+	
+	// TODO: Support division and remainder/modulus by negative number (Update methods to handle that: 2 (int, int),
+	//  2 (double, int))
+	// TODO: Support division and remainder/modulus by float (Add methods: 2 (double, double))
+	public static class Division {
+		
+		/** If true then remainder, otherwise the modulus is applied in default methods. */
+		public static final boolean config_remaindersMayBeNegative = false;
+		
+		public static class division_int_result {
+			public final int quot, rem;
+			public division_int_result(int quotient, int remainder) {
+				quot = quotient;
+				rem = remainder;
+			}
+			public String toString() {return quot +" ("+rem+")";}
+		}
+		public static class division_fp_result {
+			public final int quot;
+			public final double rem;
+			public division_fp_result(int quotient, double remainder) {
+				quot = quotient;
+				rem = remainder;
+			}
+			public String toString() {return quot +" ("+rem+")";}
+		}
+		
+		
+		/** Divides an int by an int in a way that results an int quotient and an int remainder or modulo. */
+		public static division_int_result div(int num, int by) {
+			if (config_remaindersMayBeNegative)
+				return div_remainder(num, by);
+			else
+				return div_modulo(num, by);
+		}
+		// The by param will be like 24, 60, 12 etc. and not a fp num unlike num that
+		// may be (3 + 0.38) seconds, hence the parameter by will not need to be a fp.
+		/** Divides an int by an int in a way that results an int quotient and a fp remainder or modulo. */
+		public static division_fp_result div(double num, int by) {
+			if (config_remaindersMayBeNegative)
+				return div_remainder(num, by);
+			else
+				return div_modulo(num, by);
+		}
+		
+		// Remainders may be negative
+		//  1, 5 ->  0, 1
+		//  7, 5 ->  1, 2
+		// -1, 5 ->  0, -1 (not -1, 4)
+		// -6, 5 -> -1, -1 (not -2, 4)
+		/** Divides an int by an int in a way that results an int quotient and an int <b><i>remainder</i></b> and
+		 *  that the remainder (or modulo) may be negative. */
+		public static division_int_result div_remainder(int num, int by) {
+			if (by <= 0) throw new IllegalArgumentException("÷ by <= 0");
+			int div = num / by;
+			int rem = num % by;
+			fn.assertAnyway(div*by + rem == num, div+"*"+by+" + "+rem+" != "+num);
+			return new division_int_result(div, rem);
+		}
+		// Remainders may be negative
+		//  1, 5 ->  0, 1
+		//  7, 5 ->  1, 2
+		// -1, 5 ->  0, -1 (not -1, 4)
+		// -6, 5 -> -1, -1 (not -2, 4)
+		/** Divides a fp by an int in a way that results an int quotient and a fp <b><i>remainder</i></b> and that
+		 *  the remainder (or modulo) may be negative. */
+		public static division_fp_result div_remainder(double num, int by) {
+			if (by <= 0) throw new IllegalArgumentException("÷ by <= 0");
+			int div = ((int) num) / by;
+			double rem = num % by;
+			
+			fn.assertAnyway(Math.abs((div*by + rem) - num) < 0x1p-30 , div+"*"+by+" + "+rem+" != "+num);
+			return new division_fp_result(div, rem);
+		}
+		
+		
+		// Remainders can't be negative
+		//  1, 5 ->  0, 1
+		//  7, 5 ->  1, 2
+		// -1, 5 -> -1, 4 (not 0, -1)
+		// -6, 5 -> -2, 4 (not -1, -1)
+		/** Divides an int by an int in a way that results an int quotient and an int <b><i>modulo</i></b> and that
+		 *  the modulo (or remainder) can't be negative. */
+		public static division_int_result div_modulo(int num, int by) {
+			if (by <= 0) throw new IllegalArgumentException("÷ by <= 0");
+			int div;
+			if (num < 0) {
+				div = ((num+1) / by);
+				div += -1;
+			}
+			else {
+				div = num / by;
+			}
+			int rem = fn.modulo(num, by);
+			
+			
+			fn.assertAnyway(div*by + rem == num, div+"*"+by+" + "+rem+" != "+num);
+			fn.assertAnyway(rem >= 0, "rem < 0 in modulus with by > 0");
+			return new division_int_result(div, rem);
+		}
+		
+		
+		// Remainders can't be negative
+		//  1, 5 ->  0, 1
+		//  7, 5 ->  1, 2
+		// -1, 5 -> -1, 4 (not 0, -1)
+		// -6, 5 -> -2, 4 (not -1, -1)
+		/** Divides a fp by an int in a way that results an int quotient and a fp <b><i>modulo</i></b> and that the
+		 *  modulo (or remainder) can't be negative. */
+		public static division_fp_result div_modulo(double num, int by) {
+			if (by <= 0) throw new IllegalArgumentException("÷ by <= 0");
+			int div;
+			if (num < 0) {
+				div = (floor(num+1)) / by;
+				div += -1;
+			}
+			else {
+				div = ((int) num) / by;
+			}
+			double rem = fn.modulo(num, by);
+			
+			fn.assertAnyway(Math.abs((div*by + rem) - num) < 0x1p-30 , div+"*"+by+" + "+rem+" != "+num);
+			fn.assertAnyway(rem >= 0, "rem < 0 in modulus with by > 0");
+			return new division_fp_result(div, rem);
+		}
+		
+		private static void test() {
+			fn.print(div_modulo(239, 24)); // 9 (23)
+			fn.print(div_modulo(240, 24)); // 10 (0)
+			fn.print(div_modulo(241, 24)); // 10 (1)
+			fn.print(div_modulo(-239, 24)); // -10 (1)
+			fn.print(div_modulo(-240, 24)); // -10 (0)
+			fn.print(div_modulo(-241, 24)); // -11 (23)
+			fn.print();
+			fn.print(div_modulo(239.0, 24)); // 9 (23)
+			fn.print(div_modulo(240.0, 24)); // 10 (0)
+			fn.print(div_modulo(241.0, 24)); // 10 (1)
+			fn.print(div_modulo(-239.0, 24)); // -10 (1)
+			fn.print(div_modulo(-239.5, 24)); // -10 (0.5)
+			fn.print(div_modulo(-240.0, 24)); // -10 (0)
+			fn.print(div_modulo(-240.5, 24)); // -11 (23.5)
+			fn.print(div_modulo(-240.2, 24)); // -11 (23.8)
+			fn.print(div_modulo(-240.05, 24)); // -11 (23.95)
+			fn.print(div_modulo(-240.005, 24)); // -11 (23.995)
+			fn.print(div_modulo(-240.001, 24)); // -11 (23.999)
+			fn.print(div_modulo(-240.5, 24)); // -11 (23.5)
+			fn.print(div_modulo(-241.0, 24)); // -11 (23)
+		}
+		
+	}
+	
+	
+	/** You pass a few values alongside with their capacities and this method overflows/underflows whichever
+	 *  exceeds its capacity or starves below 0 to the one larger (such as an amount of hours, minutes and seconds).
+	 *  Note: Also handles if one value is so large that it exceeds the larger subsequent value
+	 *  even after overflowing/underflowing to/from it; such as 6000 seconds is 100 minutes and finally is 1 hour
+	 *  and 40 minutes (overflows seconds into hours too).
+	 *
+	 *  @param valueAndMaxPairs_littleEndian_inout Values overflow/underflow into/from the subsequents (itr.next()).
+	 *  The wrapper/pointers are mutated to reflect the changes.
+	 *
+	 *  @return The overflow/underflow from the largest unit. */
+	public static int overUnderflowValues(
+		Iterable<fn.Tuple2<fn.Union2<fn.Pointer<Integer>, fn.Pointer<Double>>, Integer>> valueAndMaxPairs_littleEndian_inout
+	) {
+		int carry = 0;
+		for (var currentUnit: valueAndMaxPairs_littleEndian_inout) {
+			final var current = currentUnit.val1;
+			final int max = currentUnit.val2;
+			if (current.getType() == 1) { // Int
+				var res = fn.Division.div(current.get1().value + carry, max);
+				carry = res.quot;
+				current.get1().value = res.rem;
+			} else if (current.getType() == 2) { // Float
+				var res = fn.Division.div(current.get2().value + carry, max);
+				carry = res.quot;
+				current.get2().value = res.rem;
+			}
+			else throw new Error();
+			
+		}
+		
+		return carry;
+		
+	}
+	
+	
 	/* ------------------------------------------------ --------------- ------------------------------------------------ */
+	
+	
+	
 	
 	
 	
@@ -507,7 +937,7 @@ public class fn {
 //	public static boolean isAssertOn() {try {assert false; return false;} catch (AssertionError e) {return true;}}
 	public static boolean isAssertOn() {
 		boolean[] a = {false};
-		assert mk1AndRet1(a); // No asserton error is thrown in any case but that line is executed if asserts are on.
+		assert mk1AndRet1(a); // No assertion error is thrown in any case but that line is executed if asserts are on.
 		return a[0];
 	}
 	
@@ -559,14 +989,19 @@ public class fn {
 	}
 	/* ------------------------------------------------ ---------------------- ------------------------------------------------ */
 	
-	
-	public static boolean loadLibrary(String libname) { // “ABC” for “libABC.so” and “ABC.dll”
+	// “ABC” for “libABC.so” and “ABC.dll”
+	public static boolean loadLibrary(String libname) {
 		
 		// Try to find from the directories in the OS environment variable “PATH”
-		try {System.loadLibrary(libname);
-						fn.print("(loaded a library from some kind of a path)");
-		return true;}
-		catch (SecurityException | UnsatisfiedLinkError | NullPointerException e) {}
+		try {
+			System.loadLibrary(libname);
+			fn.log("(loaded a native library from some kind of a library path)");
+			return true;
+		}
+		catch (SecurityException | UnsatisfiedLinkError | NullPointerException e) {
+//			fn.log(e.getMessage());
+//			fn.log(str.getStackTraceText(e));
+		}
 		
 		// Try to find from the directory where the class file of this source file is in
 		String path;
@@ -577,11 +1012,16 @@ public class fn {
 				fn.class.getResource(cls.getSimpleName()+".class").toURI()
 			)).getCanonicalFile().getParent();
 		} catch (IllegalArgumentException | URISyntaxException | IOException e1) {path = "";}
-		for (String arg: new linklist<>(path+"\\"+libname+".dll", path+"/"+"lib"+libname+".so"))
-			try {System.load(arg);
-						fn.print("(loaded a library from the dir containing the class)");
-			return true;}
-			catch (IllegalArgumentException | SecurityException | UnsatisfiedLinkError | NullPointerException e) {}
+		for (String arg: new String[] {path+"\\"+libname+".dll", path+"/"+"lib"+libname+".so"})
+			try {
+				System.load(arg);
+				fn.log("(loaded a native library from the dir containing the class)");
+				return true;
+			}
+			catch (IllegalArgumentException | SecurityException | UnsatisfiedLinkError | NullPointerException e) {
+//				fn.log(e.getMessage());
+//				fn.log(str.getStackTraceText(e));
+			}
 		return false;
 	}
 	
@@ -713,7 +1153,7 @@ public class fn {
 	public static double pow(double base, double exponent) {return java.lang.Math.pow(base, exponent);}
 	/** Deals with integers, therefore does not have the risk of reducing the number because of the
 	 *  floating point precision error like in the example that could be as following:
-	 *  (int) Math.pow(7, 2) = 7<sup>2</sup> -> (int) ~48.9999999998475 -> 48<p> */
+	 *  (int) Math.pow(7, 2) = 7<sup>2</sup> -> (int) ~48.9999999998475 -> 48 */
 	public static long pow(long base, int exponent) {
 		if (base == 0 && exponent == 0) // 0^0 = 0^(1-1) = 0^1 / 0^1 = 0/0
 			throw new ArithmeticException("0^0 -- 0 divided by 0");
@@ -742,19 +1182,34 @@ public class fn {
 //	public static <Key, Value> Map<Key, Value> union(Map<Key, Value> a, Map<Key, Value> b) {}
 //	public static <Key, Value> Map<Key, Value> intersection(Map<Key, Value> a, Map<Key, Value> b) {}
 //	public static <Key, Value> Map<Key, Value> subtract(Map<Key, Value> from, Map<Key, Value> thisMap) {}
-//	public static <Key, Value> Map<Key, Value> doSetOperations(Map<Key, Value> a, Map<Key, Value> b, Map<Key, Value> union, Map<Key, Value> intersection, Map<Key, Value> AMinusB) {}
+//	public static <Key, Value> Map<Key, Value> doSetOperations(
+//		Map<Key, Value> a, Map<Key, Value> b,
+//		Map<Key, Value> out_union,
+//		Map<Key, Value> out_intersection,
+//		Map<Key, Value> out_AMinusB
+//	) {}
 	
-	public static <Key, Value> Value getOrCreate(java.util.Map<Key, Value> from, Key get, Supplier<Value> putIfAbsent) {
-		return getOrCreate(from, get, (e) -> putIfAbsent.get());
+	public static <Key, Value> Value getOrCreate(java.util.Map<Key, Value> from, Key key, Supplier<Value> putIfAbsent) {
+		return getOrCreate(from, key, putIfAbsent, null);
 	}
+	
 	// TODO: Maybe change that to take Function<Value, Value> instead of Function<Key, Value> so that it can
-	// update the existing value if the parameter is not null.
-	public static <Key, Value> Value getOrCreate(java.util.Map<Key, Value> from, Key key, Function<Key, Value> putIfAbsent) {
-		Value v = from.get(key);
-		if (v == null) {
-			v = putIfAbsent.apply(key);
+	//  update the existing value if the parameter is not null.
+	public static <Key, Value> Value getOrCreate(java.util.Map<Key, Value> from, Key key, Supplier<Value> putIfAbsent, Function<Value, Value> updateIfExist) {
+		boolean absent = !from.containsKey(key);
+		Value v;
+		if (absent) {
+			v = putIfAbsent.get();
 			Object old = from.put(key, v);
-			if (old != null) throw new AssertionError();
+			fn.assertAnyway(old == null);
+		} else { // Exists
+			v = from.get(key);
+			if (updateIfExist != null) { // Update existing
+				Value oldV1 = v;
+				v = updateIfExist.apply(v);
+				Value oldV2 = from.put(key, v);
+				fn.assertAnyway(oldV1 == oldV2);
+			}
 		}
 		return v;
 	}
@@ -773,7 +1228,8 @@ public class fn {
 	
 	
 	
-	// TODO: MAYBE HAVE A MASK ON WHICH ONES WILL BE SELECTED AND WHICH WILL BE NOT, AND AT EASH VALUE, DETERMINE IT THROUGH RANDOMBOOL (target_left/items_left)
+	// TODO: MAYBE HAVE A MASK ON WHICH ONES WILL BE SELECTED AND WHICH WILL BE NOT, AND AT EACH VALUE, DETERMINE IT
+	//  THROUGH RANDOMBOOL (target_left/items_left)
 	public static <E> list<E> pickRandomNElements(list<E> from, int qty) {
 		// TODO: Maybe try to make use of PriorityQueues
 		// We can't just select&pop a random element from a arraylist or linkedlist as each selection will cost us O(n + log(n)) which is just O(n)!
@@ -980,7 +1436,7 @@ public class fn {
 	
 	
 	
-	/* ---------------------------------------- Immutable orderless group types (set finit knwon size) with variable types ---------------------------------------- */
+	/* ------------------------------ Immutable orderless group types (set with known size) with repeatable elements of variable type ------------------------------ */
 	private static class Groups {
 		@SafeVarargs
 		public static <E> String toString(E... values) {
@@ -1008,6 +1464,8 @@ public class fn {
 			for (int hcode: hcodes) c = 31*c + hcode;
 			return c;
 		}
+		
+		// FIXME: Split this method into 2 versions: Ono copying into new set and other returning a view AS SET!
 		@SafeVarargs
 		public static <E> java.util.Set<E> toSet(E... elms) {
 			java.util.Set<E> set = new java.util.HashSet<>();
@@ -1098,7 +1556,7 @@ public class fn {
 //	public static <T> Group3<T> group3(java.util.Set<T> _2elms) {
 //		return new Group3<>();
 //	}
-	/* ------------------------------------------------ --------------------------------------------------- ------------------------------------------------ */
+	/* ------------------------------ ----------------------------------------------------------------------------------------------- ------------------------------ */
 	
 	
 	
@@ -1110,6 +1568,10 @@ public class fn {
 	// depending on a ClassCastException's being thrown or not.
 	// That's why I seem to be doing both spaghetti code and be wasting
 	// memory in the code with fields like val2, val3, val4 etc.
+	
+	// FIXME: Shouldn't the Unions be immutable??? Remove the setters and add factory methods like with1, with2 etc.
+	//  and maybe also remove the chance of being not set to any value --- it is not a pointer to be able to be null!!
+	//  Why not store the union inside a fn.Pointer to emulate mutability???
 	
 	private static abstract class Union {
 		public Union() {
@@ -1161,9 +1623,9 @@ public class fn {
 		public Object reset() {
 			if (type == 0) return null;
 			final Object old = get();
-			type = 0;
 			if (type == 1) {val1 = null;}
 			else if (type == 2) {val2 = null;}
+			type = 0;
 			return old;
 		}
 		
@@ -1208,10 +1670,10 @@ public class fn {
 		public Object reset() {
 			if (type == 0) return null;
 			final Object old = get();
-			type = 0;
 			if (type == 1) {val1 = null;}
 			else if (type == 2) {val2 = null;}
 			else if (type == 3) {val3 = null;}
+			type = 0;
 			return old;
 		}
 		
@@ -1259,11 +1721,11 @@ public class fn {
 		public Object reset() {
 			if (type == 0) return null;
 			final Object old = get();
-			type = 0;
 			if (type == 1) {val1 = null;}
 			else if (type == 2) {val2 = null;}
 			else if (type == 3) {val3 = null;}
 			else if (type == 4) {val4 = null;}
+			type = 0;
 			return old;
 		}
 		
@@ -1317,12 +1779,12 @@ public class fn {
 			if (type == 0) return null;
 			// In case anyone criticizes for not, I know how to use switch but just don't quite want to use it.
 			final Object old = get();
-			type = 0;
 			if (type == 1) {val1 = null;}
 			else if (type == 2) {val2 = null;}
 			else if (type == 3) {val3 = null;}
 			else if (type == 4) {val4 = null;}
 			else if (type == 5) {val5 = null;}
+			type = 0;
 			return old;
 		}
 		
@@ -1381,6 +1843,7 @@ public class fn {
 	
 	/** Handy shortcut in place of “new fn.Wrapper<>()” */
 	public static <E> Pointer<E> wrap() {return new Pointer<>();}
+	/** Handy shortcut in place of “new fn.Wrapper<>()” */
 	public static <E> Pointer<E> wrap(E value) {return new Pointer<>(value);}
 //	public static intWrapper wrap(int value) {return new intWrapper(value);}
 	public static <E> Pointer<E> concurrentWrap() {throw new UnsupportedOperationException();}
@@ -1495,22 +1958,12 @@ public class fn {
 			if (item == null) {
 				item = supplier.get();
 				cache = new java.lang.ref.WeakReference<>(item);
-			} return item;
+			}
+			return item;
 		}
 		
 	}
 	
-	// TODO: Remove this.
-				/** Constructs the object and holds the reference once its 'get' method is called. */
-	//			@Deprecated public static class StrongReference<Item> implements Supplier<Item> {
-	//				private Item value = null;
-	//				private final Supplier<Item> supplier;
-	//				public StrongReference(Supplier<Item> supplier) {this.supplier = supplier;}
-	//				public Item get() {
-	//					if (value == null) value = supplier.get();
-	//					return value;
-	//				}
-	//			}
 	
 	
 	/** Returns the native class path string of the VM that is from the OS environment variable, specified in the commandline
@@ -1546,7 +1999,8 @@ public class fn {
 	
 	/* ------------------------------------------------ number <-> byte array operations ------------------------------------------------ */
 	
-	/* byte (as should be): 1, int: 4, long: 8 bytes.
+	/* 
+	 * byte (as should be): 1, int: 4, long: 8 bytes.
 	 * Those are already defined in Java Language Specification (requiring all JREs/JDKs follow to
 	 * declare themselves as JRE/JDK), but JUST IN CASE.
 	 * 
@@ -1555,7 +2009,8 @@ public class fn {
 	 * counted as C/C++ compiler (to be compatible to the native CPU's registers and architecture
 	 * and avoid unnecessary performance reduction); we have types like uint8_t, int32_t and int64_t
 	 * as well, also like int_least32_t and uint_fast64_t. See https://en.cppreference.com/w/cpp/language/types
-	 * for how the sizes of C/C++ numeric types like int, long long, unsigned short etc. differ. */
+	 * for how the sizes of C/C++ numeric types like int, long long, unsigned short etc. differ.
+	 */
 	private static final boolean intHasExpectedSize, longHasExpectedSize; // 4, 8
 	private static final boolean doubleHasExpectedSize; // 8
 //	private static final byte byteBuffersUseBigEndianForIntAndLong; // -1: undefined, 0/1: false/true
@@ -1620,10 +2075,10 @@ public class fn {
 					new tupi(123456, b64d.apply("AAHiQA==")),
 					new tupi(-123456, b64d.apply("//4dwA=="))
 				}) {
-					if (!comp.apply(new byte[][] {tuple.data,  fromSBEInt(tuple.value)})) {
+					if (!comp.apply(new byte[][] {tuple.data,    fromSBEInt(tuple.value)})) {
 						myImplWorksCorrectly = false; break A;
 					}
-					if (!(                        tuple.value == toSBEInt(tuple.data)  )) {
+					if (!(                        tuple.value == toSBEInt(  tuple.data ) )) {
 						myImplWorksCorrectly = false; break A;
 					}
 				}
@@ -1635,27 +2090,26 @@ public class fn {
 					new tupl(123456, b64d.apply("AAAAAAAB4kA=")),
 					new tupl(-123456, b64d.apply("///////+HcA="))
 				}) {
-					if (!comp.apply(new byte[][] {tuple.data,  fromSBELong(tuple.value)})) {
+					if (!comp.apply(new byte[][] {tuple.data,    fromSBELong(tuple.value)})) {
 						myImplWorksCorrectly = false; break A;
 					}
-					if (!(                        tuple.value == toSBELong(tuple.data)  )) {
+					if (!(                        tuple.value == toSBELong(  tuple.data ) )) {
 						myImplWorksCorrectly = false; break A;
 					}
 				}
 				myImplWorksCorrectly = true;
 			}
 			
-			if (!myImplWorksCorrectly) throw new Error("AAAAAAAAAAAAAAA!!!!!!");
-		}
-		else {
+			if (!myImplWorksCorrectly) throw new AssertionError();
+		} else {
 			
 		}
 	}}
 	
 	// TODO: Implement your own method and get rid of this!
-	private final static String byteBufferEndianErrorMsg
-	= "Since java.nio.ByteBuffer does not use signed big endian for int and long "
-			+ "in this runtime, converting between int/long and byte[] is not possible.";
+	private final static String
+		byteBufferEndianErrorMsg = "Since java.nio.ByteBuffer does not use signed big endian for int and long "
+		                         + "in this runtime, converting between int/long and byte[] is not possible.";
 	
 	
 	
@@ -1873,7 +2327,7 @@ public class fn {
 	// features a single such method (taking arrays as objects then runtime-checking),
 	// arraycopy, that is different and is not among those many methods in the Arrays class.
 	// It looks important and much more fundamental than those in java.util.Arrays; as cool as
-	// the System class itself where it is defined in 🤩🥺 
+	// the System class itself where it is defined in 🤩🥹 
 	// Here I'm wrapping (and ready to implement my own way too) it.
 	
 	// Accepts 1 based indexes and also negative indexes.
@@ -2076,11 +2530,17 @@ public class fn {
 	
 	
 	// TODO: Move these into an appropriate class instead of fn!!
-	private static native boolean windowsExplorerOpenFolderAndSelectItem(byte[] utf8EncodeOfPath, byte[] utf8EncodeOfFile);
-	public static boolean windowsExplorerOpenFolder(String folderToOpen) {return windowsExplorerOpenFolderAndSelectItem(str.utf8encode(folderToOpen), null);}
+	private static native boolean windowsExplorerOpenFolderAndSelectItem(byte[] utf8EncodeOfPath, byte[] utf8EncodeOfFilename);
+	public static boolean windowsExplorerOpenFolder(String folderToOpen) {
+		return windowsExplorerOpenFolderAndSelectItem(str.utf8encode(folderToOpen), null);
+	}
 	public static boolean windowsExplorerOpenFolderAndSelectItem(String folderToOpen, String filenameToSelect) {
-		if (filenameToSelect == null) return windowsExplorerOpenFolder(folderToOpen);
-		else return windowsExplorerOpenFolderAndSelectItem(str.utf8encode(folderToOpen), str.utf8encode(filenameToSelect));
+		if (filenameToSelect == null)
+			return windowsExplorerOpenFolder(folderToOpen);
+		else
+			return windowsExplorerOpenFolderAndSelectItem(
+				str.utf8encode(folderToOpen), str.utf8encode(filenameToSelect)
+			);
 	}
 	
 	

@@ -231,20 +231,22 @@ public class FileIO {
 	}
 	
 	
-	// TODO: Test that!
-	public static boolean move(String from, String to) {
-		fn.log("Warning: called untested method\n"+str.getStackTraceText());
-		return (new java.io.File(from)).renameTo(new java.io.File(to));
+	public static void move(String from, String to) throws IOException {
+		boolean success = (new java.io.File(from)).renameTo(new java.io.File(to));
+		if (!success) throw new IOException(
+			"Couldn't move "+from+" into "+to+": java.io.File.renameTo(File) returned false"
+		);
 	}
 	
 	
 	// TODO
-	// This is probably a temporary entry. When FileIO.File is finished, remove the f*ck out of this!!!!!
-	// Does not depend on whether the actual path is a file at that time, just represents a path and
-	// whether it is file or dir or what the hell ever.
+	//  This is probably a temporary entry. When FileIO.File is finished, remove the f*ck out of this!!!!!
+	//  Does not depend on whether the actual path is a file at that time, just represents a path and
+	//  whether it is file or dir or what the hell ever.
 	public static class FileSystemEntry {
 		public final String path;
-		public final EntryType type; // not just bool; maybe also symbolic links or folder-like items that intersect some of their files 😱 
+		// not just bool; maybe also symbolic links or folder-like items that intersect some of their files 😱
+		public final EntryType type;
 		public static enum EntryType {
 			file(1), directory(2);
 			private EntryType(int type) {this.typecode = type;}
@@ -712,10 +714,13 @@ public class FileIO {
 
 
 
-class FileIOException extends java.io.IOException {
+/*class FileIOException extends IOException {
 	private static final long serialVersionUID = 1L;
 //	private final String fileName;
 //	public FileIOException(String fileName) {this.fileName = fileName;}
-	public FileIOException(String fileName) {super("Error: The file \u201c" + fileName + "\u201d could not be found or accessed.");}
+	public FileIOException(String message) {super(message);}
+//	public static String getFileNotFoundOrAccessedMessage(String fileName) {
+//		return "Error: The file \u201c" + fileName + "\u201d could not be found or accessed.";
+//	}
 //	public String toString() {return "Error: The file \u201c" + fileName + "\u201d could not be found or accessed.";}
-}
+}*/

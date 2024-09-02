@@ -1,4 +1,3 @@
-import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.util.*;
 import java.util.function.*;
@@ -7,93 +6,12 @@ import java.util.regex.*;
 public class str {
 	private str() {}
 	
-	public static class StrNative {
-		private static boolean nativeLoaded = false, nativeLoadTried = false;
-		private static byte nativeLoadStatus = 0; // 0: not tried, -1: failed, +1: successful
-		
-		/* Considering 3 different consoles: the Unix shell, the Windows console and console of the Eclipse on Windows;
-		 *   -> Unix shell does not misbehave in printing Unicode text in Java, but the others require using the C-way (through a native JNI lib)
-		 *   -> All of them suffer in doing the same in C, but we need the C-way only for Windows and Eclipse Windows consoles.
-		 *   -> Unix shell and the Windows Eclipse console needs setlocale(LC_CTYPE, "")...
-		 *   -> ...however, Windows console needs the not-so-nice-looking _setmode(_fileno(stdout), _O_U16TEXT), which ruins the others!
-		 *   -> If the code prints a unicode text on Windows console without problem, it can't do that in the same way onto Windows CMD.
-		 */
-		
-		private static native void setCConsoleLocale();
-		private static native void setCConsoleLocaleForUnix();
-		private static native void setCConsoleLocaleForWindows();
-		private static native void resetCConsoleLocaleForWindows();
-		/* Deprecated because we'll print the raw bytes (by public void java.io.OutputStream.write(byte[])) as UTF-8 encoding of
-		 * the text we want to print and expect the console to use the exact same encoding so that the text would get displayed
-		 * properly. */
-		@Deprecated private static native void println(String text);
-		private static native String getCmdLine0();
-		private static native String[] getCmdArgs0();
-		
-	//	static {loadNative();}
-		
-		
-	//	public static void print(String text) {if (nativeLoaded) println(text);}
-		/** Writes the UTF-8 encoding result of the text without an extra newline. */
-		public static void print(String text) {
-			if (nativeLoaded)
-				try {fn.outStream().write(text.getBytes("UTF-8"));}
-				catch (IOException e) {throw new InternalError(e);}
-			else if (!nativeLoadTried) {loadNative(); print(text);}
-			else fn.outStream().print(text);
-//			else {
-//				java.io.PrintStream k = fn.outStream();
-//				for (String ch: new list<>((i) -> str.sliceString(text, i, i), fn.range(text.length()))) {
-//					fn.sleep(0.01);
-//					k.print(ch);
-//					k.flush();
-//				}
-//			}
-		}
-		// Specific for Windows because the Java Runtime Environment doesn't get the arguments from Windows consoles properly and alters the non-latin characters.
-		public static String getCmdLine() {if (nativeLoaded) return getCmdLine0(); return null;}
-		private static String[] getCmdArgs() {if (nativeLoaded) return getCmdArgs0(); return null;}
-		
-		public static boolean nativeLoaded() {return nativeLoaded;}
-		
-		public static void setConsoleLocale(boolean forUnix, boolean forWin) {
-			if (!nativeLoaded) return;
-			if (forUnix) setCConsoleLocaleForUnix();
-			if (forWin) setCConsoleLocaleForWindows();
-		}
-		
-		public static boolean loadNative() {
-		//	if (nativeLoadTried) return nativeLoaded;
-			if (nativeLoaded) return true;
-			nativeLoaded = fn.loadLibrary("nativePrint");
-			nativeLoadTried = true;
-			// (Invoke setlocale/setmode)
-			return nativeLoaded;
-		}
-	}
+	
 	
 	/** Class with one string list for the characters of per one of the lower and upper case of an alphabet. */
 	public static class Alphabet {
 		public final Set<String> uppercase, lowercase;
 		public Alphabet(Set<String> upper, Set<String> lower) {uppercase = upper; lowercase = lower;}
-	}
-	
-	/** @Deprecated Because this method does not accept loner than 1-chacter units to be allowed for the
-	 *  input string to consist only of to return true. It can't be used to test whether a string contains
-	 *  only “12” or “89” (and not “18” or “29” or “111”). Also it accepts meaningful values, which are
-	 *  prone for typos that can't be checked in the compile-time, for the parameters to behave differently. */
-	@Deprecated public static boolean consistsOnlyOf(String text, String chars) {
-		if (chars.equals("alphabet")) return consistsOnlyOf(text, "alphabet lowercase");
-		if (chars.equals("digits")) return consistsOnlyOf(text, "0123456789");
-		if (chars.equals("alphabet lowercase")) return consistsOnlyOf(text, __alphabet.g(1));
-		if (chars.equals("alphabet uppercase")) return consistsOnlyOf(text, __alphabet.g(2));
-	A:	for (int i: fn.range(text.length())) {
-			for (int j: fn.range(chars.length()))
-				if (slice(text, i, i).equals(slice(chars, j, j)))
-					continue A;
-			return false;
-		}
-		return true;
 	}
 	
 	
@@ -129,51 +47,86 @@ public class str {
 	
 	private static final Supplier<Alphabet> trAlphabet;
 	private static final Supplier<Alphabet> alphabet;
+	private static final Supplier<java.util.Map<String, ?>>
+		whiteSpaces = fn.cachedReference(() -> {
+		java.util.Map<String, ?> set = new java.util.HashMap<>();
+		for (String ch: new linklist<>(" ", "\n", "\r")) set.put(ch, null);
+		return set;
+	});
+	public static String platformLineSeparator() {return System.lineSeparator();}
 	
+	
+	
+	/** Just a handy shortcut for the <code>String String.formatted(Object...)</code> that doesn't exist in the Standard
+	 *  Library until Java 15 and <code>static String String.format(String, Object...)</code>  */
+	// FIXME: Either find a way to make IDEs warn about mismatching format templates and arguments or remove this altogether.
+	@Deprecated public static String format(String formatTemplate, Object... args) {
+		return String.format(formatTemplate, args);
+	}
 	
 	public static String reduce(String text) {
 		String out;
+		
 		// Separate the f**k out of the accent add-ons characters
 		out = java.text.Normalizer.normalize(text, java.text.Normalizer.Form.NFKD);
+		
 		// Kick the f**k out of them
 		out = out.replaceAll("\\p{M}", "");
 		out = out.toLowerCase(Locale.ENGLISH);
+		
+		// Now most importantly replace “е” into “e” and “а” to “a” (the first a and e are instead an exact same
+		// looking different character (some Russian lowercase letter) and perform similar replacements (or at
+		// least replace them with a differentiable placeolding symbol like #)!!!
+//		out = out.replaceAll("(?![a-z]|[0-9]).", "#");
+		out = out.replaceAll("(?![\\x00-\\x7F]).", "#"); // Replace all non-ascii
+		// MAYBE: Maybe also try to cleanup them (not sensible though; why replace a Russian character with a latin
+		//  one?
+		// MAYBE: Also replace the smart quotes with normal ones?
+		
+		
 		return out;
 	}
 	
 	
+	
 	// TODO: When inserting the quick regex matching methods and classes, consider merging with the reduce method.
 	
-	/** Lowercases the string and reduces the not-ascii looking characters into their
-	 *  corresponding-ish versions. When used with a string wrapper implementing its
-	 *  hashCode and equals functions on top of this version of the string it holds, helps
-	 *  treating a string like “AbcĞİ” same way as the one like “abCğı” by
-	 *  reducing both of them into “abcgi”.
-	 *  <p>Warning: The result of the results should not be used as a permanent value
-	 *  and only as rather temporary values for comparison and hash values. “Aè” for example,
-	 *  will not always be “a#” just because I did not implement a mapping as è -> e */
-	// DONE: Make it like it discards and cleanup()'s all the diactricts and also handles characters with diactricts (like normal ğ, ş, ã etc.) vs the plain characters and diactrict add-on unicode characters (like “a” followed by an intermediate non-printable char and a ~)
-	public static String reduce_old(String text) {
-		java.util.Map<String, String> trmap = mapTRChars.get();
-		java.util.Map<String, ?> asLetDec = asciiLetterAndDecimals.get();
-		java.util.Map<String, ?> space = whiteSpaces.get();
-		
-		list<String> letters = new linklist<>((i) -> str.slice(text, i, i), fn.range(text.length()));
-//		list<String> weird, replaceWith;
-		{
-			list<String> _letters = new linklist<>(letters);
-			letters.clear();
-			for (String letter: _letters) {
-				String replacement = trmap.get(letter);
-				if (replacement != null) letters.add(replacement);
-				else if (asLetDec.containsKey(letter)) letters.add(letter);
-				else if (space.containsKey(letter)) letters.add(letter);
-				else letters.add("#");
-			}
-		}
-		return str.join(letters, "").toLowerCase();
-	}
+//	/** Lowercases the string and reduces the not-ascii looking characters into their
+//	 *  corresponding-ish versions. When used with a string wrapper implementing its
+//	 *  hashCode and equals functions on top of this version of the string it holds, helps
+//	 *  to treat a string like “AbcĞİ” same way as the one like “abCğı” by
+//	 *  reducing both of them into “abcgi”.
+//	 *  <p>Warning: The result of the results should not be used as a permanent value
+//	 *  and only as rather temporary values for comparison and hash values. “Aè” for example,
+//	 *  will not always be “a#” just because I did not implement a mapping as è -> e */
+//	// DONE: Make it like it discards and cleanup()'s all the diactricts and also handles characters with diactricts (like normal ğ, ş, ã etc.) vs the plain characters and diactrict add-on unicode characters (like “a” followed by an intermediate non-printable char and a ~)
+//	@Deprecated public static String reduce_old(String text) {
+//		java.util.Map<String, String> trmap = mapTRChars.get();
+//		java.util.Map<String, ?> asLetDec = asciiLetterAndDecimals.get();
+//		java.util.Map<String, ?> space = whiteSpaces.get();
+//		
+//		list<String> letters = new linklist<>((i) -> str.slice(text, i, i), fn.range(text.length()));
+////		list<String> weird, replaceWith;
+//		{
+//			list<String> _letters = new linklist<>(letters);
+//			letters.clear();
+//			for (String letter: _letters) {
+//				String replacement = trmap.get(letter);
+//				if (replacement != null) letters.add(replacement);
+//				else if (asLetDec.containsKey(letter)) letters.add(letter);
+//				else if (space.containsKey(letter)) letters.add(letter);
+//				else letters.add("#");
+//			}
+//		}
+//		return str.join(letters, "").toLowerCase();
+//	}
 	
+	/** Indeed just the same thing as string1.equals(string2)
+	 */
+	public static boolean compare(String str1, String str2) {
+		fn.noNull(str1, str2);
+		return str1.equals(str2);
+	}
 	public static boolean compareReduced(String str1, String str2) {
 		fn.noNull(str1, str2);
 		return reduce(str1).equals(reduce(str2));
@@ -214,12 +167,8 @@ public class str {
 		for (String ch: split.apply(".-,:;*?\\/{}[]()<>|!'^+%&~$#_")) set.put(ch, null);
 		return set;
 	});
-	private static final Supplier<java.util.Map<String, ?>>
-		whiteSpaces = fn.cachedReference(() -> {
-			java.util.Map<String, ?> set = new java.util.HashMap<>();
-			for (String ch: new linklist<>(" ", "\n", "\r")) set.put(ch, null);
-			return set;
-		});
+	
+	
 	
 	
 	
@@ -352,31 +301,36 @@ public class str {
 	 *  endian and use str.binary() for operations like these. */
 	@Deprecated public static String toUnsignedBinaryString(byte num) {throw new UnsupportedOperationException();}
 	
-	public static String multiply(String strn, int itrNum) {return multiply(strn, itrNum, "");}
-	public static String multiply(String strn, int itrNum, String delimiter) {
-		// 1   2 3 4 5
-		
-		// itrNum = 5	1 2 3 4  -  5
-		// itrNum = 4	1 2 3  -  4
-		// itrNum = 3	1 2  -  3
-		// itrNum = 2	1  -  2
-		// itrNum = 1	.  -  1
-		// itrNum = 0	.  -  .
+	public static String multiply(String strn, int by) {return multiply(strn, by, "");}
+	public static String multiply(String strn, int by, String delimiter) {
+		// by = 5	1- 2- 3- 4- 5
+		// by = 3	1- 2- 3
+		// by = 1	 1
+		// by = 0	
 		
 		StringBuilder sb = new StringBuilder();
 		String _new = delimiter+strn;
-		for (int i: fn.range(1, (itrNum >= 1)?1:0, 1))
+		for (int i: fn.range(1, (by >= 1)?1:0, 1))
 			sb.append(strn);
-		for (int i: fn.range(2, itrNum, 1))
+		for (int i: fn.range(2, by, 1))
 			sb.append(_new);
 		return sb.toString();
 	}
 	
 	public static final String lineSeparatorRegex = "((\n)|(\r\n))+";
 	
+	/** Returns quoted version of the string if not null, otherwise returns null. */
+	public static String quote(String str) {
+		if (str==null) return null;
+		else return "\u201c"+str+"\u201d";
+	}
+	
+	/** Escapes the <code>"</code>, <code>'</code>, <code>\</code>, <code>LF</code>, <code>CR</code> and <code>TAB</code>
+	 *  characters. Note: Does not escape any Unicode characters. */
 	public static String escapeString(String str) {
 		String result, nextChar;
-		if (str==null) return "<null>";
+		// TODO: Return “<null>” really?
+		if (str == null) return "<null>";
 		result = "";
 		result += "\u201c";
 		for (int i: fn.range(1, str.length(), 1)) {
@@ -421,7 +375,7 @@ public class str {
 	
 	@SuppressWarnings("resource")
 	public static String getStackTraceText(Throwable th) {
-		String[] trace = {""};
+		fn.Pointer<String> trace = fn.wrap("");
 		th.printStackTrace(new java.io.PrintWriter(new java.io.Writer() {
 			public void write(char[] cbuf, int off, int len) {
 				if (len+off > cbuf.length) {
@@ -432,12 +386,12 @@ public class str {
 				}
 				char[] str = new char[len];
 				for (int i: fn.range(1, len, 1)) str[i-1] = cbuf[off+i-1];
-				trace[0] = trace[0] + new String(str);
+				trace.value = trace.value + new String(str);
 			}
 			public void flush() {}
 			public void close() {}
 		}));
-		return trace[0];
+		return trace.value;
 	}
 	/** @deprecated Getting another thread's stack trace does not quite much make sense. */
 	@Deprecated private static String getStackTraceText(Thread th) {
@@ -683,13 +637,20 @@ public class str {
 		}
 	}*/
 	
-	/** Used for pretty-printing floating-point values.
-	 */
-	@SuppressWarnings("unused")
+	
+	// TODO: Add a round method to round to a range of amount of digits: like 3-5 rounding 0.12, 0.1234 and 0.1234567
+	//  into 0.120, 0.1234 and 0.12346 
+	/** Used for pretty-printing floating-point values. */
 	public static String round(double num, int afterFp) {
+		return round(num, afterFp, true);
+	}
+	/** Used for pretty-printing floating-point values.
+	 *  @param onlyUpTo Do not necessarily keep a bunch of trailing zeros */
+	public static String round(double num, int afterFp, boolean onlyUpTo) {
 		if (afterFp < 0) throw new IllegalArgumentException("afterFp < 0");
-		String formatTemplate = afterFp > 0 ? "0." : "0";
-		for (int i: fn.range(afterFp)) formatTemplate = formatTemplate + "0";
+		String afterFPChar = onlyUpTo ? "#" : "0";
+		String formatTemplate = afterFp > 0 ? "0"+"." : "0";
+		for (int i: fn.range(afterFp)) formatTemplate = formatTemplate + afterFPChar;
 		java.text.DecimalFormat df = new java.text.DecimalFormat(formatTemplate);
 		df.setRoundingMode(java.math.RoundingMode.HALF_UP);
 		return df.format(num);
@@ -736,52 +697,22 @@ public class str {
 		return false;*/
 	}
 	
-		public static boolean startsWith(String text, String prefix, int offset) {
-			if (offset < 0) throw new IllegalArgumentException("Given offset amount is negative, which does not quite make sense");
-			if (!(text.length() >= prefix.length() + offset)) return false;
-			return text.startsWith(prefix, offset);
-		}
-		public static boolean endsWith(String text, String suffix, int offset) {
-			if (offset < 0) throw new IllegalArgumentException("Given offset amount is negative, which does not quite make sense");
-			if (!(text.length() >= suffix.length() + offset)) return false;
-			return text.startsWith(suffix, text.length() - suffix.length() - offset);
-		}
-		public static boolean startsWith(String text, String prefix) {
-			return startsWith(text, prefix, 0);
-		}
-		public static boolean endsWith(String text, String suffix) {
-			return endsWith(text, suffix, 0);
-		}
-		
-		
-	//	************************************ (garbage??) ************************************
-			// TODO: Index (at least 1) or offset (at least 0)????????
-			// TODO: Maybe (!) use your implementation that slices and compares (though might use additional unnecessary memory with very large main string)
-			// TODO: Check length differences etc. as well as just the f.ing index!
-			// TODO: startsWith and endsWith with index/offset OR startsOrEndsWith with only index (negative to check for ends and positive to for starts)??????
-			//            -> i.e. containsAt style (but negative means count the end of the substring and not start as the index, or count the start but count
-			//               from the ending of the MAIN string???????????)
-			// Hence those below are f.ing PRIVATE till u get ur ass to decide on all those!!!
-			private static boolean _startsWith(String text, String prefix, int index) {
-			//	if (index == 0) throw new IllegalArgumentException("Given index is 0");
-				if (index <= 0) throw new IllegalArgumentException("Given index is not positive");
-			//	if (index < 0) index = -index;
-			//	if (index < 0) throw new IndexOutOfBoundsException("Index: "+index+", Size: "+text.length());
-			//	if (index < 0) return text.startsWith(prefix_suffix, index-1);
-			//	else return text.endsWith(prefix_suffix, index-1);
-				return text.startsWith(prefix, index-1);
-			}
-			private static boolean _endsWith(String text, String suffix, int index) {
-				if (index <= 0) throw new IllegalArgumentException("Given index is not positive");
-				return text.startsWith(suffix, text.length() - suffix.length() - index + 1);
-			}
-			private static boolean _startsWith(String text, String prefix) {
-				return _startsWith(text, prefix, 1);
-			}
-			private static boolean _endsWith(String text, String suffix) {
-				return _endsWith(text, suffix, 1);
-			}
-	//	************************************ (garbage??) ************************************
+	public static boolean startsWith(String text, String prefix, int offset) {
+		if (offset < 0) throw new IllegalArgumentException("Given offset amount is negative, which does not quite make sense");
+		if (!(text.length() >= prefix.length() + offset)) return false;
+		return text.startsWith(prefix, offset);
+	}
+	public static boolean endsWith(String text, String suffix, int offset) {
+		if (offset < 0) throw new IllegalArgumentException("Given offset amount is negative, which does not quite make sense");
+		if (!(text.length() >= suffix.length() + offset)) return false;
+		return text.startsWith(suffix, text.length() - suffix.length() - offset);
+	}
+	public static boolean startsWith(String text, String prefix) {
+		return startsWith(text, prefix, 0);
+	}
+	public static boolean endsWith(String text, String suffix) {
+		return endsWith(text, suffix, 0);
+	}
 	
 	
 	
@@ -793,7 +724,7 @@ public class str {
 	 */
 	// obj.get("part1") -> matcher.group("part1"), obj.get(2) -> matcher.group(2)
 	// TODO: Consider removing this (at expense of making any code calling this
-	// dependent on a class that you don't own) and using a MatchResult
+	//  dependent on a class that you don't own) and using a MatchResult
 	public static class Match {
 //		private final MatchResult matchResult;
 		private final Matcher matcher;
@@ -1159,27 +1090,27 @@ public class str {
 		
 		
 		public static class FormattedText {
-			private final basicList<strStyleUnion> attributes;
+			private final BasicList<StrStyleUnion> attributes;
 			
 			public FormattedText() {
-				attributes = new basicList<strStyleUnion>() {
-					public strStyleUnion get(int i) {
+				attributes = new BasicList<StrStyleUnion>() {
+					public StrStyleUnion get(int i) {
 						throw new IndexOutOfBoundsException();
 					}
 					public int size() {return 0;}
 				};
 			}
 			
-			public FormattedText(Iterable<strStyleUnion> entries) {
-				list<strStyleUnion> entryList = new linklist<>(entries);
-				strStyleUnion[] arr = new strStyleUnion[entryList.size()];
+			public FormattedText(Iterable<StrStyleUnion> entries) {
+				list<StrStyleUnion> entryList = new linklist<>(entries);
+				StrStyleUnion[] arr = new StrStyleUnion[entryList.size()];
 				
-				attributes = new basicList<str.TextStyle.strStyleUnion>() {
-					public strStyleUnion get(int i) {return arr[i-1];}
+				attributes = new BasicList<StrStyleUnion>() {
+					public StrStyleUnion get(int i) {return arr[i-1];}
 					public int size() {return arr.length;}
 				};
 				
-				{int i = 0; for (strStyleUnion entry: entries) {
+				{int i = 0; for (StrStyleUnion entry: entries) {
 					arr[(++i)-1] = entry;
 				}}
 			}
@@ -1189,11 +1120,11 @@ public class str {
 //				return new FormattedText();
 //			}
 			
-			public FormattedText(basicList<strStyleUnion> _list) {
+			public FormattedText(BasicList<StrStyleUnion> _list) {
 				attributes = _list;
 			}
 			
-			public basicList<strStyleUnion> getAttributes() {
+			public BasicList<StrStyleUnion> getAttributes() {
 				return attributes;
 			}
 			
@@ -1201,7 +1132,7 @@ public class str {
 			public FormattedText text(String text) {
 				return concat(new FormattedText(
 					java.util.Arrays.asList(
-						new strStyleUnion(text)
+						new StrStyleUnion(text)
 					)
 				));
 			}
@@ -1209,7 +1140,7 @@ public class str {
 			public FormattedText style(Style style) {
 				return concat(new FormattedText(
 					java.util.Arrays.asList(
-						new strStyleUnion(style)
+						new StrStyleUnion(style)
 					)
 				));
 			}
@@ -1218,7 +1149,7 @@ public class str {
 			public FormattedText concat(FormattedText suffix) {
 				FormattedText prefix = this;
 				
-				basicList<strStyleUnion> attrList = new basicList<strStyleUnion>() {
+				BasicList<StrStyleUnion> attrList = new BasicList<StrStyleUnion>() {
 					private int prefixSize = -1, suffixSize = -1;
 					// Remember (cache) the this's size in the new object, to avoid calculating again and again by calling the prefix's and suffix's size() s and summing them
 					private int prefixSize() {
@@ -1232,7 +1163,7 @@ public class str {
 						else return suffixSize = suffix.attributes.size();
 					}
 					
-					public strStyleUnion get(int ind) {
+					public StrStyleUnion get(int ind) {
 						if (ind > prefixSize())
 //							return that.attributes.get(ind - sizeOfEnclosed);
 							return suffix.attributes.get(ind - prefixSize());
@@ -1278,7 +1209,7 @@ public class str {
 						str.join(linklist.fromArray(codes), ";")
 					);
 				};
-				for (strStyleUnion part: attributes)
+				for (StrStyleUnion part: attributes)
 					if (part.isString) output[0] = output[0] + part.text;
 					else {
 						plain = false;
@@ -1289,36 +1220,44 @@ public class str {
 			}
 			public String toPlainString() {
 				String plain = "";
-				for (strStyleUnion part: attributes)
+				for (StrStyleUnion part: attributes)
 					if (part.isString) plain = plain + part.text;
 				return plain;
 			}
 			
 			
 			/** Prints the formatted text into the passed {@link java.io.PrintStream PrintStream} parameter */
-			public void printlnTo(java.io.PrintStream out) {printTo(out); out.println();}
+			public void printlnTo(java.io.PrintStream out) {
+				printTo(out); // Print this to out
+//				out.println();
+				fn.ProcessConsoleIO.print(out, str.platformLineSeparator()); // Print newline to out
+			}
 			/** Prints the formatted text into the passed {@link java.io.PrintStream PrintStream} parameter */
 			public void printTo(java.io.PrintStream out) {
 				int count = 0, len = attributes.size();
 				String end = "m";
-				for (strStyleUnion entry: attributes) {
+				for (StrStyleUnion entry: attributes) {
 					count++;
 					if (!entry.isString) {
 						out.write(esc);
-						out.print("[" + str.join(java.util.Arrays.asList(entry.format.getCodes()), ";"));
-						out.print(end);
+//						out.print("[" + str.join(java.util.Arrays.asList(entry.format.getCodes()), ";"));
+						fn.ProcessConsoleIO.print(out, "[" + str.join(java.util.Arrays.asList(entry.format.getCodes()), ";"));
+//						out.print(end);
+						fn.ProcessConsoleIO.print(out, end);
 					} else {
-						out.print(entry.text);
+//						out.print(entry.text);
+						fn.ProcessConsoleIO.print(out, entry.text);
 					}
 					if (count == len) {
 						out.write(esc);
-						out.print("[0"+end);
+//						out.print("[0"+end);
+						fn.ProcessConsoleIO.print(out, "[0"+end);
 					}
 				}
 			}
 			
 			
-			public static interface basicList<E> extends Iterable<E> {
+			public static interface BasicList<E> extends Iterable<E> {
 				public E get(int ind);
 				public int size();
 				public default java.util.Iterator<E> iterator() {
@@ -1333,17 +1272,17 @@ public class str {
 			
 		}
 		
-		public static class strStyleUnion {
+		public static class StrStyleUnion {
 			public final String text;
 			public final Style format;
 			public final boolean isString;
 			
-			public strStyleUnion(String text) {
+			public StrStyleUnion(String text) {
 				this.text = text;
 				this.format = null;
 				this.isString = true;
 			}
-			public strStyleUnion(Style format) {
+			public StrStyleUnion(Style format) {
 				this.text = null;
 				this.format = format;
 				this.isString = false;
@@ -1358,7 +1297,8 @@ public class str {
 //			return prefix + input + constant.RESET;
 //		}
 		
-		// TODO: Make so that the returned color has a public Style FrontColor.asBackgroundColor() that returns the style for coloring the background with the same color.
+		// TODO: Make so that the returned color has a public Style FrontColor.asBackgroundColor() that returns
+		//  the style for coloring the background with the same color.
 		// Not used customcolor because some consoles (like PuTTY) do not support it yet.
 		// If yours supports at least xterm256 (8bit) colors let's just be thankful
 		// instead of expecting the 24-bit (16-million colors) support
@@ -1532,9 +1472,9 @@ public class str {
 			 * some text with a special escape character to change the text color, with a proper number
 			 * instead of 0, to represent the closest possible xterm256 color constant to the given values. */
 			/* TODO: Make it so that called value triplets get either in a weak HashMap to their XTerm256
-			 * numbers so that the every entry of the map is cleared whenever the GC hits it (i.e. not ones
-			 * used too often and became in long generation or eden space in the heap); or a HashMap that
-			 * clears one per insertion after the ~10th. */
+			 *  numbers so that the every entry of the map is cleared whenever the GC hits it (i.e. not ones
+			 *  used too often and became in long generation or eden space in the heap); or a HashMap that
+			 *  clears one per insertion after the ~10th. */
 			public static xterm256color forRGB(int r, int g, int b) {
 				Function<int[][], Double> calcDiff = (values) -> {
 					// [[r1, r2], [g1, b2], [b1, b2]] -> ...

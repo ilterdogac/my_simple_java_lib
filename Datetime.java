@@ -6,6 +6,13 @@ public class Datetime implements Comparable<Datetime> {
 	
 	
 	public static boolean warnDeprecated = true;
+	/** Controls whether to accept the overflowing amounts of hour, minute, second and fractions in Time (not TimeAmount). */
+	public static final boolean config_time_allowOverflowing = false;
+	/** Controls whether to accept the overflowing amounts of hour, minute, second and fractions in TimeAmount. */
+	public static final boolean config_timeamount_allowOverflowing = true;
+	// TODO: Remove this: It really doesn't sense to let sec_frag to overflow into seconds without litting seconds or
+	//  bigger to overflow into the biggers.
+	public static final boolean config_allowSecFragToOverflowIfExceed1 = false;
 	
 	// The below few methods are deprecated fallback methods until I finally get my *ss up to be done with my classes for handling Datetime issues.
 	// date -> DD-MM-yyyy HH.mm.ss
@@ -103,85 +110,6 @@ public class Datetime implements Comparable<Datetime> {
 	
 	
 	
-	private static class Division {
-		
-		public static class division_int_result {
-			public final int div, rem;
-			public division_int_result(int d, int r) {
-				div = d;
-				rem = r;
-			}
-			public String toString() {return div+" ("+rem+")";}
-		}
-		private static class division_fp_result {
-			public final int div;
-			public final double rem;
-			public division_fp_result(int d, double r) {
-				div = d;
-				rem = r;
-			}
-			public String toString() {return div+" ("+rem+")";}
-		}
-		
-		
-		public static division_int_result div(int num, int by) {
-			return div2(num, by);
-		}
-		// The by param will be like 24, 60, 12 etc. and not a fp num unlike num that
-		// may be (3 + 0.38) seconds, hence the parameter by will not need to be a fp.
-		public static division_fp_result div(double num, int by) {
-			return div2(num, by);
-		}
-		
-		//  1, 5 ->  0, 1
-		//  7, 5 ->  1, 2
-		// -1, 5 ->  0, -1 (not -1, 4)
-		// -6, 5 -> -1, -1 (not -2, 4)
-		public static division_int_result div1(int num, int by) {
-			if (by < 0) throw new IllegalArgumentException("by < 0");
-			int div = num / by;
-			int rem = num % by;
-			fn.assertAnyway(div*by + rem == num, div+"*"+by+" + "+rem+" != "+num);
-			return new division_int_result(div, rem);
-		}
-		public static division_fp_result div1(double num, int by) {
-			if (by < 0) throw new IllegalArgumentException("by < 0");
-			int div = ((int) num) / by;
-			double rem = num % by;
-			
-			fn.assertAnyway(Math.abs((div*by + rem) - num) < 0x1p-30 , div+"*"+by+" + "+rem+" != "+num);
-			return new division_fp_result(div, rem);
-		}
-		
-		//  1, 5 ->  0, 1
-		//  7, 5 ->  1, 2
-		// -1, 5 -> -1, 4 (not 0, -1)
-		// -6, 5 -> -2, 4 (not -1, -1)
-		public static division_int_result div2(int num, int by) {
-			if (by < 0) throw new IllegalArgumentException("by < 0");
-			int div = num / by;
-			if (num < 0) div += -1;
-			int rem = fn.modulo(num, by);
-			fn.assertAnyway(div*by + rem == num, div+"*"+by+" + "+rem+" != "+num);
-			return new division_int_result(div, rem);
-		}
-		public static division_fp_result div2(double num, int by) {
-			if (by < 0) throw new IllegalArgumentException("by < 0");
-			int div = ((int) num) / by;
-			double rem = fn.modulo(num, by);
-			
-			fn.assertAnyway(Math.abs((div*by + rem) - num) < 0x1p-30 , div+"*"+by+" + "+rem+" != "+num);
-			return new division_fp_result(div, rem);
-		}
-		
-	}
-	
-	
-	
-//	public Datetime(Datetime clone) { // Copy constructor
-//		this(clone.date, clone.time);
-//	}
-	
 	public Datetime(Date date, Time time) { // Generic constructor
 		this.date = date;
 		this.time = time;
@@ -191,7 +119,8 @@ public class Datetime implements Comparable<Datetime> {
 		return now(plusTimezoneH, 0);
 	}
 	public static Datetime now(int plusTimezoneH, int plusTimezoneM) {
-		return new Datetime((new java.util.Date()).getTime() + plusTimezoneH*60*60*1000 + plusTimezoneM*60*1000);
+		long millisSinceEpoch = (new java.util.Date()).getTime();
+		return new Datetime(millisSinceEpoch + plusTimezoneH*60*60*1000 + plusTimezoneM*60*1000);
 	}
 	
 	public Datetime(long millisSinceEpoch) {
@@ -206,7 +135,7 @@ public class Datetime implements Comparable<Datetime> {
 		// TODO: Implement a method to calculate the millis since epoch instead of depending such weird APIs!!
 		java.util.Calendar cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("GMT+0"));
 		cal.set(date.year, date.month-1, date.day, time.hour, time.minute, time.second);
-		cal.add(java.util.Calendar.MILLISECOND, (int) (time.second_frag * 1_000_000));
+		cal.add(java.util.Calendar.MILLISECOND, (int) (time.second_frag*1_000_000 + 0.5));
 		return cal.getTimeInMillis();
 	}
 	
@@ -261,7 +190,11 @@ public class Datetime implements Comparable<Datetime> {
 		public final int day, month, year;
 		
 		public Date(int day, int month, int year) {
-//			if (year >= 24 || year < 0) throw new IllegalArgumentException();
+//			if (year >= ... || year < 0) throw new IllegalArgumentException();
+			if (year < 0) throw new UnsupportedOperationException(
+				"Negative years are not yet implemented (not sure how to display them properly in " +
+					"dd-mm-yyyy format besides using “BC”)"
+			);
 			if (month > 12 || month < 1) throw new IllegalArgumentException(toString(day, month, year)+" is not a valid date.");
 			if (day > 31 || month < 1) throw new IllegalArgumentException();
 			this.year = year;
@@ -335,7 +268,7 @@ public class Datetime implements Comparable<Datetime> {
 		A:	{
 				for (int i: fn.range(500000)) {
 					if (d > monthDay(m, y)) {
-						Division.division_int_result res = Division.div(d, monthDay(m, y));
+						fn.Division.division_int_result res = fn.Division.div(d, monthDay(m, y));
 					}
 					if (false) break A;
 				}
@@ -360,7 +293,7 @@ public class Datetime implements Comparable<Datetime> {
 		A:	{
 				for (int i: fn.range(500000)) {
 					if (d > 1000) {
-						Division.division_int_result res = Division.div(d, monthDay(m, y));
+						fn.Division.division_int_result res = fn.Division.div(d, monthDay(m, y));
 					}
 					if (false) break A;
 				}
@@ -384,9 +317,8 @@ public class Datetime implements Comparable<Datetime> {
 		}
 	}
 	
-	
-	public static class Date_obsolete implements Comparable<Date_obsolete> {
-		private static final String /*acceptedDelimiter=".", */preferredDelimiter="-";
+	/*@Deprecated public static class Date_obsolete implements Comparable<Date_obsolete> {
+		private static final String *//*acceptedDelimiter=".", *//*preferredDelimiter="-";
 		private static final Supplier<list<String>> months = fn.cachedReference(() -> new linklist<>(
 			"January", "February", "March", "April", "May", "June", "July", "August", "Setember", "October", "November", "December"
 		));
@@ -481,7 +413,7 @@ public class Datetime implements Comparable<Datetime> {
 			public Date_obsolete getTo() {return end;}
 			public String toString() {return start + " \u2013 " + end;}
 		}
-	}
+	}*/
 	
 // ---------------------------------------------------------------- ---- ----------------------------------------------------------------
 	
@@ -490,35 +422,155 @@ public class Datetime implements Comparable<Datetime> {
 	
 // ---------------------------------------------------------------- Time ----------------------------------------------------------------
 	
+	// TODO: Bring the functionality to support timezones!
 	public static class Time implements Comparable<Time> {
+		
 		public final byte hour, minute, second;
+		// TODO: Make this null as this is public so users wouldn't need to predict that they need to deal with NaN
+		//  as well (dealing with null is already enough)
+		/** NaN if precise up to seconds */
 		public final double second_frag; // in [0, 1)
 		
 		public Time(int hour, int minute, int second) {
-			this(hour, minute, second, Double.NaN);
+			this(hour, minute, second, null);
 		}
 		
-		public Time(int hour, int minute, int second, double sec_frag) {
-			list<String> errors = new linklist<>();
-			if (!(hour >= 0 && hour <= 23)) errors.add("Hour value can\'t be out of 0\u201323");
-			if (!(minute >= 0 && minute <= 59)) errors.add("Minute value can\'t be out of 0\u201359");
-			if (!(second >= 0 && second <= 59)) errors.add("Second value can\'t be out of 0\u201359");
-			if (!errors.isEmpty()) throw new IllegalArgumentException(
-				"Input format is not valid:\n"+str.join(new linklist<>((s) -> " \u2022 "+s, errors), "\n")
-			);
+		
+		
+		/** Overflows the hours, minutes, second and second-fract values in a day, and returns how many days the equaling
+		 *  value (which is shorter than a day) is less than the value the passed parameters ar modified into.
+		 *  For example: If passed 23, 90, 0, 0.0; the params become 1, 30, 0, 0.0 and returns 1 (1d 1h 30m 0+0.0s).
+		 *  
+		 *  @param inout_secondFracts Optional and may be null. */
+		public static int overUnderFlowHMS(
+			fn.Pointer<Integer> inout_hours, fn.Pointer<Integer> inout_minutes, fn.Pointer<Integer> inout_seconds, fn.Pointer<Double> inout_secondFracts
+		) {
 			
-			byte sec = (byte) second;
-			if (!Double.isNaN(sec_frag)) {
-				sec = (byte) (int) (sec + sec_frag);
-				sec_frag = sec_frag % 1;
+			list<fn.Tuple2<fn.Union2<fn.Pointer<Integer>, fn.Pointer<Double>>, Integer>> iterable_LE = list.listWrapper.getArList();
+			if (inout_secondFracts != null)
+				iterable_LE.add(fn.tuple(fn.union(null, inout_secondFracts), 1));
+			iterable_LE.add(fn.tuple(fn.union(inout_seconds, null), 60));
+			iterable_LE.add(fn.tuple(fn.union(inout_minutes, null), 60));
+			iterable_LE.add(fn.tuple(fn.union(inout_hours, null), 24));
+			
+			
+			int lastOverflow = fn.overUnderflowValues(iterable_LE);
+			
+			return lastOverflow;
+			
+		}
+		/** Overflows the hours, minutes, second and second-fract values in a day, and returns how many days the equaling
+		 *  value (which is shorter than a day) is less than the value the passed parameters ar modified into.
+		 *  For example: If passed 23, 90, 0, 0.0; the params become 1, 30, 0, 0.0 and returns 1 (1d 1h 30m 0+0.0s). */
+		public static int overUnderFlowHMS(
+			fn.Pointer<Integer> inout_hours, fn.Pointer<Integer> inout_minutes, fn.Pointer<Integer> inout_seconds
+		) {
+			return overUnderFlowHMS(inout_hours, inout_minutes, inout_seconds, null);
+		}
+		
+		
+		/** Normally does NOT accept the overflowing amounts of hour, minute, second and fractions.
+		 *  @param sec_frag Optional and may be null. */
+		public Time(int hour, int minute, int second, Double sec_frag) {
+			final int hour_o = hour, minute_o = minute, second_o = second;
+			final Double sec_frag_o = sec_frag;
+			
+			final int lastOverflow;
+			
+			if (config_time_allowOverflowing) { // Fix the overflowing amounts
+				fn.Pointer<Integer>
+					h = fn.wrap(hour),
+					m = fn.wrap(minute),
+					s = fn.wrap(second);
+				fn.Pointer<Double> sf = sec_frag == null ? null : fn.wrap(sec_frag);
+				lastOverflow = overUnderFlowHMS(h, m, s, sf);
+				hour = h.value;
+				minute = m.value;
+				second = s.value;
+				if (sf != null) sec_frag = sf.value; // Replaced with null if already is null
+				
+				try {
+					// Now must be within the constraints!
+					checkHMSConstraints(hour, minute, second, sec_frag);
+				} catch (Exception | Error e) {
+					throw new AssertionError(e);
+				}
+			} else {
+				// Nothing is overflowing (except sec_frag, which sec will not overflow so can't be longer than
+				// 24h or shorter than 0s)
+				lastOverflow = 0;
+				
+				// If sec_frags is not null...
+				if (sec_frag != null) {
+					// Overflow sec_frags into seconds if configured so
+					if (config_allowSecFragToOverflowIfExceed1) {
+						fn.Pointer<Integer> s = fn.wrap(second);
+						fn.Pointer<Double> sf = fn.wrap(sec_frag);
+						int secondOverflow;
+						{
+							list<fn.Tuple2<fn.Union2<fn.Pointer<Integer>, fn.Pointer<Double>>, Integer>> iterable_LE = list.listWrapper.getArList();
+							iterable_LE.add(fn.tuple(fn.union(null, sf), 1));
+							iterable_LE.add(fn.tuple(fn.union(s, null), 60));
+							// 00:00:(59 + 1.1) -> 00:00:60.1 -> Error! (not 00:01:00.1)
+							secondOverflow = fn.overUnderflowValues(iterable_LE);
+						}
+						sec_frag = sf.value;
+						// Un-overflow the second so if it has overflown then it becomes back exceeding its max
+						second = s.value + 60*secondOverflow;
+						
+						// Seconds may be >=60 because of the overflowing sec_frag (but aren't overflown
+						// into minutes as it is not config-set to be done so)
+						// Therefore checkHMSConstraints(hour, minute, second, sec_frag) is done at the end
+					}
+				}
+				
+				checkHMSConstraints(hour, minute, second, sec_frag);
 			}
 			
-			this.hour = (byte) hour;
-			this.minute = (byte) minute;
-			this.second = sec;
-			this.second_frag = sec_frag % 1;
+			// Hours don't have anything to overflow into so don't let a too big value
+			if (lastOverflow > 0)
+				throw new IllegalArgumentException(
+					str.format(
+						"Value entered is too late to be a time moment in a day (>= 24h): %s:%s:%s",
+						/*pad0leftBy2(*/hour_o/*)*/, /*pad0leftBy2(*/minute_o/*)*/, /*pad0leftBy2(*/second_o/*)*/
+					)
+				);
+			if (lastOverflow < 0)
+				throw new IllegalArgumentException(
+					str.format(
+						"Value entered is too early to be a time moment in a day (< 0 seconds): %s:%s:%s",
+						/*pad0leftBy2(*/hour_o/*)*/, /*pad0leftBy2(*/minute_o/*)*/, /*pad0leftBy2(*/second_o/*)*/
+					)
+				);
+			
+			
+			this.hour = fn.toByte(hour);
+			this.minute = fn.toByte(minute);
+			this.second = fn.toByte(second);
+			this.second_frag = sec_frag != null ? sec_frag : Double.NaN;
 		}
 		
+		
+		
+		
+		/** Checks if all of the hour, minute and second values of a time value are within their limits
+		 *  (<24, <60, <60, <1).
+		 *  @param sec_frag Optional and may be null. */
+		public static void checkHMSConstraints(int hour, int minute, int second, Double sec_frag) throws IllegalArgumentException {
+			double tiny = 1.0 / (2 << 20);
+			list<String> errors = new linklist<>();
+			if (!(hour >= 0 && hour < 24)) errors.add("Hour value can't be out of 0–23: "+hour);
+			if (!(minute >= 0 && minute < 60)) errors.add("Minute value can't be out of 0–59: "+minute);
+			if (!(second >= 0 && second < 60)) errors.add("Second value can't be out of 0–59: "+second);
+			if (sec_frag != null) {
+				if (!(sec_frag >= 0-tiny && sec_frag < 1+tiny)) errors.add("Second fragment value can't be out of [0.0, 1.0): "+sec_frag);
+			}
+			if (!errors.isEmpty()) throw new IllegalArgumentException(
+				"Input format is not valid:"+str.platformLineSeparator()+str.join(
+					new linklist<>((s) -> " \u2022 "+s, errors), str.platformLineSeparator()
+				)
+			);
+		}
 		public final int compareTo(Time that) {
 			if (this.hour < that.hour) return -1;
 			if (this.hour > that.hour) return +1;
@@ -526,6 +578,12 @@ public class Datetime implements Comparable<Datetime> {
 			if (this.minute > that.minute) return +1;
 			if (this.second < that.second) return -1;
 			if (this.second > that.second) return +1;
+			Double sf1 = this.second_frag, sf2 = that.second_frag;
+			if (sf1.isNaN()) sf1 = null;
+			if (sf2.isNaN()) sf2 = null;
+			if (sf1 == null && sf2 == null) return 0;
+			if (sf1 == null) return ((Double) 0.0).compareTo(sf2);
+			if (sf2 == null) return sf1.compareTo(0.0);
 			if (this.second_frag < that.second_frag) return -1;
 			if (this.second_frag > that.second_frag) return +1;
 			return 0;
@@ -561,11 +619,20 @@ public class Datetime implements Comparable<Datetime> {
 		}
 		public String toString(String delimiter) {
 			if (Double.isNaN(second_frag))
-				return String.format("%s"+delimiter+"%s"+delimiter+"%s", pad0leftBy2(hour), pad0leftBy2(minute), pad0leftBy2(second));
+				return String.format(
+					"%s"+delimiter+"%s"+delimiter+"%s",
+					pad0leftBy2(hour),
+					pad0leftBy2(minute),
+					pad0leftBy2(second)
+				);
 			else
-				// TODO: Fix this part!
-				return String.format("%s"+delimiter+"%s"+delimiter+"%s", pad0leftBy2(hour), pad0leftBy2(minute), pad0leftBy2(second));
-
+				return String.format(
+					"%s"+delimiter+"%s"+delimiter+"%s",
+					pad0leftBy2(hour),
+					pad0leftBy2(minute),
+					str.round(second+second_frag, 3, true)
+				);
+			
 		}
 		
 //		public Time add(Time that) {
@@ -596,15 +663,10 @@ public class Datetime implements Comparable<Datetime> {
 //		}
 //		
 		public static boolean checkHour(int h) {return h >= 0 && h < 24;}
-//		public static boolean checkMin(int m) {return m >= 0 && m < 60;}
-//		public static boolean checkSecond(int s) {return s >= 0 && s < 60;}
-//		public static boolean checkSecondFrag(double sf) {
-//			return (Math.abs(sf - 0) < 0x1p-30) || (Math.abs(sf - 1) < 0x1p-30) || (sf >= 0 && sf < 1);
-//		}
 		
 		// TODO: Maybe try passing the modified values from the least significant to the most
-		// significant (to a method returning 2 items) for whether they overflow and need to
-		// spill out to the greater or starving and need to take from the greater!!!
+		//  significant (to a method returning 2 items) for whether they overflow and need to
+		//  spill out to the greater or starving and need to take from the greater!!!
 		
 		public Time addHours(int hours) {
 //			if (hours < 0) throw new IllegalArgumentException();
@@ -618,9 +680,9 @@ public class Datetime implements Comparable<Datetime> {
 			int hour = this.hour;
 			int min = this.minute + mins;
 			{
-				Division.division_int_result res = Division.div(min, 60);
+				fn.Division.division_int_result res = fn.Division.div(min, 60);
 				min = res.rem;
-				hour += res.div;
+				hour += res.quot;
 			}
 			if (!checkHour(hour)) return null;
 			return new Time(hour, min, second);
@@ -633,6 +695,7 @@ public class Datetime implements Comparable<Datetime> {
 			return addSeconds(secs, 0);
 		}
 		
+		// FIXME
 		public Time addSeconds(int secs, double sec_frag) {
 //			if (secs < 0) throw new IllegalArgumentException();
 			int hour = this.hour;
@@ -640,13 +703,13 @@ public class Datetime implements Comparable<Datetime> {
 			int sec = this.second + secs;
 			
 			{
-				Division.division_int_result res = Division.div(sec, 60);
+				fn.Division.division_int_result res = fn.Division.div(sec, 60);
 				sec = res.rem;
-				min += res.div;
+				min += res.quot;
 			} {
-				Division.division_int_result res = Division.div(min, 60);
+				fn.Division.division_int_result res = fn.Division.div(min, 60);
 				min = res.rem;
-				hour += res.div;
+				hour += res.quot;
 			}
 			
 			if (!checkHour(hour)) return null;
@@ -670,17 +733,54 @@ public class Datetime implements Comparable<Datetime> {
 //		}
 		
 		public TimeAmount(int secs) {
-			Datetime.Division.division_int_result divr = Division.div(secs, 60*60*24);
+			fn.Division.division_int_result divr = fn.Division.div(secs, 60*60*24);
 			hms = (new Time(0, 0, 0)).addSeconds(divr.rem);
-			days = divr.div;
+			days = divr.quot;
 		}
 		
+		
 		public TimeAmount(Time time) {
-			this(0, time);
+			this.days = 0;
+			this.hms = time;
 		}
 		public TimeAmount(int days, Time time) {
 			this.days = days;
 			this.hms = time;
+		}
+		
+		/** Normally accepts the overflowing amounts of hour, minute, second and fractions.
+		 *  @param secFractions Optional and may be null. */
+		public TimeAmount(int days, int hours, int minutes, int seconds, Double secFractions) {
+			Time hms;
+			int daysPlus;
+			if (config_timeamount_allowOverflowing) {
+				fn.Pointer<Integer>
+					h = fn.wrap(hours),
+					m = fn.wrap(minutes),
+					s = fn.wrap(seconds);
+				fn.Pointer<Double> sf = secFractions == null ? null : fn.wrap(secFractions);
+				
+				daysPlus = Time.overUnderFlowHMS(h, m, s, sf);
+				
+				if (days+daysPlus < 0) throw new IllegalArgumentException(
+					str.format(
+						"TimeAmount can't be negative: "+"%sd %sh %sm (%s + %s)s",
+						days, hours, minutes, seconds, secFractions
+					)
+				);
+				hours = h.value;
+				minutes = m.value;
+				seconds = s.value;
+				if (sf != null) secFractions = sf.value;
+			}
+			hms = new Time(hours, minutes, seconds, secFractions);
+			this.days = days + daysPlus;
+			this.hms = hms;
+		}
+		
+		/** Normally accepts the overflowing amounts of hour, minute, second and fractions. */
+		public TimeAmount(int days, int hours, int minutes, int seconds) {
+			this(days, hours, minutes, seconds, null);
 		}
 		
 		public int compareTo(TimeAmount that) {
@@ -699,86 +799,30 @@ public class Datetime implements Comparable<Datetime> {
 			return that instanceof TimeAmount && equals((TimeAmount) that);
 		}
 		
+		
 		public TimeAmount add(TimeAmount that) {
 			// FIXME: Handle the days and the overflow of the time value!!!!
 			Time combined;
 			combined = this.hms
 				.addHours(that.hms.hour)
 				.addMinutes(that.hms.minute)
-				.addSeconds(that.hms.second + that.hms.second_frag);
+				.addSeconds(that.hms.second)
+				.addSeconds(0, that.hms.second_frag);
 			return new TimeAmount(combined);
 		}
 		
-		public int secs() {return hms.hour*60*60 + hms.minute*60 + hms.second;}
-		public double secs1() {return hms.hour*60*60 + hms.minute*60 + hms.second + hms.second_frag;}
+		public int secs_int() {return hms.hour*60*60 + hms.minute*60 + hms.second;}
+		public double secs() {return hms.hour*60*60 + hms.minute*60 + hms.second + hms.second_frag;}
 		
+		
+		// TODO: Maybe make the outputs like “0 hour(s), 0 minute(s), 4 second(s)” into just “4 second(s)” instead???
 		public String toString() {
-			return String.format("%d hours, %d minutes, %d seconds", hms.hour, ""+hms.minute, ""+hms.second);
+			String res = String.format("%d hour(s), %d minute(s), %d second(s)", hms.hour, (int) hms.minute, (int) hms.second);
+			if (days > 0) res = str.format("%d day(s), ", days) + res;
+			return res;
 		}
 		
 	}
-//	public static class TimeAmount_obsolete implements Comparable<TimeAmount_obsolete> {
-//		
-//		public final int hour;
-//		public final int min;
-//		public final int sec;
-//		public final double sec_frag;
-//		
-//		
-//		public TimeAmount_obsolete(int hour, int min, double sec) {
-//			
-////			{
-////				int c;
-////				c = (int) (sec / 60);
-////				sec = sec % 60;
-////				
-////				min = c + min;
-////				c = min / 60;
-////				min = min % 60;
-////				
-////				hour = c + hour;
-////			}
-//			
-//			this.hour = hour;
-//			this.min = min;
-//			this.sec = (int) sec;
-//			this.sec_frag = sec % 1;
-//		}
-//		
-//		public int compareTo(TimeAmount_obsolete that) {
-//			if (this.hour > that.hour) return +1;
-//			if (this.hour < that.hour) return -1;
-//			if (this.min > that.min) return +1;
-//			if (this.min < that.min) return -1;
-//			if (this.sec > that.sec) return +1;
-//			if (this.sec < that.sec) return -1;
-//			return 0;
-//		}
-//		
-//		public TimeAmount_obsolete add(TimeAmount_obsolete that) {
-//			int h, m; double s;
-//			
-//			s = sec + that.sec;
-//			m = min + that.min;
-//			h = hour + that.hour;
-//			
-//			return new TimeAmount_obsolete(h, m, s);
-//		}
-//		
-//		public TimeAmount_obsolete(Double secs) {
-//			TimeAmount_obsolete t = new TimeAmount_obsolete(0, 0, secs);
-//			this.hour = t.hour;
-//			this.min = t.min;
-//			this.sec = t.sec;
-//		}
-//		
-//		public double secs() {return hour*60*60 + min*60 + sec;}
-//		
-//		public String toString() {
-//			return String.format("%s hours, %s minutes, %s seconds", ""+hour, ""+min, ""+sec);
-//		//	return String.format("%s:%s:%s", expand2(hour), expand2(minute), expand2(second));
-//		}
-//	}
 	
 // ---------------------------------------------------------------- ----------- ----------------------------------------------------------------
 	

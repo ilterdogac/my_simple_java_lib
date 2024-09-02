@@ -63,7 +63,6 @@ public class Crypto {
 	}
 	
 	
-	
 	public static byte[] embedInitVector(byte[] noIVCiphertext, byte[] initVector) {
 			byte[] retVal = new byte[4 + initVector.length + noIVCiphertext.length];
 			//  1  2  3  4  5  6  7...
